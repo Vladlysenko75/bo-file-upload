@@ -1,0 +1,150 @@
+service: bo-file-upload
+
+provider:
+  name: aws
+  stackName: bo-file-upload
+  runtime: nodejs16.x
+  stage: ${opt:stage, 'dev'}
+  region: us-east-1
+  timeout: 30
+  memorySize: 256
+  apiGateway:
+    minimumCompressionSize: 1024
+    shouldStartNameWithService: true
+  environment:
+    REGION: ${self:provider.region}
+    STAGE: ${self:provider.stage}
+    BUCKET: board-originator-api
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - lambda:InvokeFunction
+            - lambda:InvokeAsync
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - dynamodb:*
+            - events:*
+            - s3:*
+          Resource: "*"
+custom:
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    exclude: ["aws-sdk"]
+    target: "node18"
+    define:
+      "require.resolve": undefined
+    platform: "node"
+    concurrency: 10
+  dynamodb:
+    stages:
+      - dev
+    start:
+      port: 8000
+      inMemory: true
+      migrate: true
+  convertEmptyValues: true
+  "serverless-offline":
+    httpPort: 3000
+    babelOptions:
+      presets:
+        - env
+
+plugins:
+  - serverless-esbuild
+  - serverless-offline
+
+functions:
+  uploadFile:
+    handler: src/api/file/put.upload
+    events:
+      - http:
+          method: put
+          path: /file
+          request:
+            schemas:
+              application/json: ${file(src/api/file/schema.json)}
+  writeMetadata:
+    handler: src/api/metadata/write.main
+    events:
+      - s3:
+          bucket: ${self:provider.environment.BUCKET}-${self:provider.stage}
+          event: s3:ObjectCreated:*
+  processRegulatoryFile:
+    handler: src/processors/regulatory.main
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [BOTable, StreamArn]
+          batchSize: 1
+          startingPosition: LATEST
+          filterPatterns:
+            - dynamodb:
+                NewImage:
+                  fileType:
+                    S:
+                      - regulatory
+  processFinancialFile:
+    handler: src/processors/financial.main
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [BOTable, StreamArn]
+          batchSize: 1
+          startingPosition: LATEST
+          filterPatterns:
+            - dynamodb:
+                NewImage:
+                  fileType:
+                    S:
+                      - financial
+resources:
+  Resources:
+    RoleApiGateway:
+      Type: AWS::IAM::Role
+      Properties:
+        Path: "/"
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal:
+                Service:
+                  - "lambda.amazonaws.com"
+                  - "edgelambda.amazonaws.com"
+                  - "apigateway.amazonaws.com"
+              Action: "sts:AssumeRole"
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/AmazonAPIGatewayInvokeFullAccess
+          - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaRole
+    BOTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.stage}_bo_trial_table
+        StreamSpecification:
+          StreamViewType: NEW_IMAGE
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: recType
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+          - AttributeName: recType
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: recType-index
+            KeySchema:
+              - AttributeName: recType
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL

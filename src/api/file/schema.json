@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "user_id": { "type": "number" },
+    "file_type": { "type": "string", "enum": ["regulatory", "financial"] },
+    "file_name": { "type": "string" }
+  },
+  "required": ["user_id", "file_type", "file_name"]
+}
